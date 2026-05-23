@@ -2,6 +2,7 @@
 #
 # .NET 8.0.11 ARM32 Self-Contained Runtime - Advanced Patcher
 # Fixes ELF interpreter, library paths, and Bionic compatibility
+# AUTO-INSTALLS patchelf and applies fixes
 #
 
 set -e
@@ -18,15 +19,31 @@ log_warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 log_err() { echo -e "${RED}[✗]${NC} $*" >&2; }
 
 # ============================================================================
-# DOWNLOAD & EXTRACT
+# SETUP & DEPENDENCIES
 # ============================================================================
 
 PREFIX="${TERMUX_PREFIX:-/data/data/com.termux/files/usr}"
 INSTALL_DIR="$PREFIX/share/dotnet-arm32"
 BIN_DIR="$PREFIX/bin"
-# Use TMPDIR for Termux (respects read-only /tmp)
 TEMP_DIR="${TMPDIR:-.}/dotnet-patch-$$"
 RUNTIME_URL="https://dotnetcli.blob.core.windows.net/dotnet/Runtime/8.0.11/dotnet-runtime-8.0.11-linux-arm.tar.gz"
+
+log_info "Installing required tools..."
+if ! command -v patchelf &>/dev/null; then
+    log_warn "patchelf not found, installing via pkg..."
+    pkg install -y patchelf || log_warn "Could not auto-install patchelf"
+fi
+
+if ! command -v readelf &>/dev/null; then
+    log_warn "readelf (binutils) not found, installing via pkg..."
+    pkg install -y binutils || log_warn "Could not auto-install binutils"
+fi
+
+log_ok "Dependencies checked"
+
+# ============================================================================
+# DOWNLOAD & EXTRACT
+# ============================================================================
 
 log_info "Creating temp directory at: $TEMP_DIR"
 mkdir -p "$TEMP_DIR" "$INSTALL_DIR" "$BIN_DIR"
@@ -48,24 +65,32 @@ log_info "Extracting to $INSTALL_DIR..."
 tar -xzf runtime.tar.gz -C "$INSTALL_DIR"
 log_ok "Extracted"
 
+# Fix permissions
+chmod +x "$INSTALL_DIR/dotnet"
+[[ -f "$INSTALL_DIR/libcoreclr.so" ]] && chmod +x "$INSTALL_DIR/libcoreclr.so"
+log_ok "Permissions fixed"
+
 # ============================================================================
 # ELF PATCHING
 # ============================================================================
 
 log_info "Analyzing ELF headers..."
-readelf -h "$INSTALL_DIR/dotnet" | grep -E "Class|Data|Machine"
+readelf -h "$INSTALL_DIR/dotnet" 2>/dev/null | grep -E "Class|Data|Machine" || log_warn "Could not read ELF headers"
 
-CURRENT_INTERP=$(readelf -l "$INSTALL_DIR/dotnet" 2>/dev/null | grep "INTERP" | grep -oP '/lib[^"]*' || echo "UNKNOWN")
+CURRENT_INTERP=$(strings "$INSTALL_DIR/dotnet" | grep "^/lib" | head -1 || echo "UNKNOWN")
 log_info "Current interpreter: $CURRENT_INTERP"
 
 if command -v patchelf &>/dev/null; then
     log_info "Patching with patchelf..."
-    patchelf --set-interpreter /system/lib/ld-android.so "$INSTALL_DIR/dotnet"
-    [[ -f "$INSTALL_DIR/libcoreclr.so" ]] && patchelf --set-interpreter /system/lib/ld-android.so "$INSTALL_DIR/libcoreclr.so"
-    log_ok "ELF interpreter patched"
+    patchelf --set-interpreter /system/lib/ld-android.so "$INSTALL_DIR/dotnet" && \
+        log_ok "dotnet interpreter patched" || log_warn "Could not patch dotnet"
+    
+    if [[ -f "$INSTALL_DIR/libcoreclr.so" ]]; then
+        patchelf --set-interpreter /system/lib/ld-android.so "$INSTALL_DIR/libcoreclr.so" && \
+            log_ok "libcoreclr.so interpreter patched" || log_warn "Could not patch libcoreclr.so"
+    fi
 else
-    log_warn "patchelf not found (install: pkg install patchelf)"
-    log_warn "Using wrapper-based approach instead"
+    log_err "patchelf still not available after installation attempt"
 fi
 
 # ============================================================================
@@ -96,16 +121,22 @@ if [[ ! -x "$INSTALL_DIR/dotnet" ]]; then
 fi
 log_ok "Binary is executable"
 
-log_info "Checking ELF after patching..."
-NEW_INTERP=$(readelf -l "$INSTALL_DIR/dotnet" 2>/dev/null | grep "INTERP" | grep -oP '/[^"]*' || echo "UNKNOWN")
+log_info "Checking patched interpreter..."
+NEW_INTERP=$(strings "$INSTALL_DIR/dotnet" | grep "^/lib" | head -1 || echo "UNKNOWN")
 log_info "New interpreter: $NEW_INTERP"
 
 log_info "Attempting to run: dotnet --version"
 if "$INSTALL_DIR/dotnet" --version 2>&1 | head -1; then
     log_ok "SUCCESS - dotnet is working!"
 else
-    log_warn "Could not execute (may need manual testing)"
-    log_info "Try: $INSTALL_DIR/dotnet --version"
+    log_warn "Execution attempt failed - checking Bionic compatibility..."
+    file "$INSTALL_DIR/dotnet"
+    
+    # Try to get more info about why it failed
+    if [[ ! -f /system/lib/ld-android.so ]]; then
+        log_err "ERROR: Bionic interpreter not found at /system/lib/ld-android.so"
+        log_err "This device may not be Termux/Android"
+    fi
 fi
 
 # ============================================================================
@@ -127,4 +158,9 @@ echo "Installation Details:"
 echo "  Runtime: $INSTALL_DIR"
 echo "  Binary:  $BIN_DIR/dotnet"
 echo "  Version: 8.0.11"
+echo ""
+echo "If still getting 'cannot execute' error:"
+echo "  1. Check Bionic: ls -la /system/lib/ld-android.so"
+echo "  2. Verify patch: strings $INSTALL_DIR/dotnet | grep /lib"
+echo "  3. Debug: $INSTALL_DIR/dotnet --version"
 echo ""
