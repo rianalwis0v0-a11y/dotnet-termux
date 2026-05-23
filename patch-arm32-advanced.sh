@@ -24,13 +24,16 @@ log_err() { echo -e "${RED}[✗]${NC} $*" >&2; }
 PREFIX="${TERMUX_PREFIX:-/data/data/com.termux/files/usr}"
 INSTALL_DIR="$PREFIX/share/dotnet-arm32"
 BIN_DIR="$PREFIX/bin"
-TEMP_DIR="/tmp/dotnet-patch-$$"
+# Use TMPDIR for Termux (respects read-only /tmp)
+TEMP_DIR="${TMPDIR:-.}/dotnet-patch-$$"
 RUNTIME_URL="https://dotnetcli.blob.core.windows.net/dotnet/Runtime/8.0.11/dotnet-runtime-8.0.11-linux-arm.tar.gz"
 
+log_info "Creating temp directory at: $TEMP_DIR"
 mkdir -p "$TEMP_DIR" "$INSTALL_DIR" "$BIN_DIR"
 cd "$TEMP_DIR"
 
 log_info "Downloading .NET 8.0.11 ARM32 self-contained..."
+log_info "URL: $RUNTIME_URL"
 if command -v wget &>/dev/null; then
     wget -q --show-progress "$RUNTIME_URL" -O runtime.tar.gz
 else
@@ -38,7 +41,8 @@ else
 fi
 
 [[ ! -f runtime.tar.gz ]] && { log_err "Download failed"; exit 1; }
-log_ok "Downloaded"
+SIZE=$(du -h runtime.tar.gz | cut -f1)
+log_ok "Downloaded ($SIZE)"
 
 log_info "Extracting to $INSTALL_DIR..."
 tar -xzf runtime.tar.gz -C "$INSTALL_DIR"
@@ -108,6 +112,7 @@ fi
 # CLEANUP & SUMMARY
 # ============================================================================
 
+log_info "Cleaning up temporary files..."
 rm -rf "$TEMP_DIR"
 
 echo ""
